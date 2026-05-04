@@ -3,6 +3,8 @@ Razor Enhanced - Alchemy potion crafter
 
 How to use:
 1. Put a mortar and pestle, empty bottles, and reagents in your backpack.
+   If you want the script to craft the mortar and pestle when missing, also put
+   tinker tools and ingots in your backpack.
 2. Set POTION_TO_CRAFT and AMOUNT_TO_CRAFT below.
 3. Open the Alchemy crafting gump once and craft the potion manually, or fill
    the category/item button ids in POTIONS to let the script select the recipe.
@@ -21,6 +23,8 @@ AMOUNT_TO_CRAFT = 25
 
 MORTAR_AND_PESTLE_ID = 0x0E9B
 EMPTY_BOTTLE_ID = 0x0F0E
+TINKER_TOOLS_ID = 0x1EB8
+INGOT_ID = 0x1BF2
 
 # 0 means "wait for any gump". Set a fixed gump id if your shard needs it.
 CRAFT_GUMP_ID = 0
@@ -31,6 +35,22 @@ MAKE_LAST_BUTTON = 21
 # If True and button ids are configured for the selected potion, the script
 # selects the recipe once, then uses Make Last for the remaining crafts.
 SELECT_RECIPE_FIRST = False
+
+# If no mortar and pestle is found, try to craft one with Tinkering.
+AUTO_CRAFT_MORTAR_AND_PESTLE = True
+
+# 0 means "wait for any gump". Set a fixed Tinkering gump id if needed.
+MORTAR_CRAFT_GUMP_ID = 0
+
+# Common RunUO/ServUO crafting gumps use 21 for "Make Last"; verify on yours.
+MORTAR_MAKE_LAST_BUTTON = 21
+
+# Optional Tinkering button ids for the mortar and pestle recipe. If left as 0,
+# the script uses MORTAR_MAKE_LAST_BUTTON, so your last Tinkering recipe must be
+# mortar and pestle.
+MORTAR_CATEGORY_BUTTON = 0
+MORTAR_ITEM_BUTTON = 0
+MORTAR_REQUIRED_INGOTS = 3
 
 GUMP_TIMEOUT_MS = 5000
 CRAFT_RESULT_TIMEOUT_MS = 9000
@@ -177,6 +197,10 @@ def find_tool():
     return Items.FindByID(MORTAR_AND_PESTLE_ID, -1, backpack_serial(), True, False)
 
 
+def find_tinker_tools():
+    return Items.FindByID(TINKER_TOOLS_ID, -1, backpack_serial(), True, False)
+
+
 def has_weight_room():
     if MAX_WEIGHT_BUFFER <= 0:
         return True
@@ -212,11 +236,89 @@ def possible_crafts(recipe):
     return int(possible)
 
 
-def wait_for_craft_gump():
-    Gumps.WaitForGump(CRAFT_GUMP_ID, GUMP_TIMEOUT_MS)
+def wait_for_gump(gump_id):
+    Gumps.WaitForGump(gump_id, GUMP_TIMEOUT_MS)
     if not Gumps.HasGump():
         return 0
     return Gumps.CurrentGump()
+
+
+def wait_for_craft_gump():
+    return wait_for_gump(CRAFT_GUMP_ID)
+
+
+def wait_for_result():
+    result = Journal.WaitJournal(SUCCESS_MESSAGES + STOP_MESSAGES, CRAFT_RESULT_TIMEOUT_MS)
+    if not result:
+        return 'unknown'
+
+    result_text = str(result)
+    result_lower = result_text.lower()
+    for stop_message in STOP_MESSAGES:
+        if stop_message.lower() in result_lower:
+            say('Stop dal journal: {0}'.format(result_text), 33)
+            return 'stop'
+
+    return 'success'
+
+
+def craft_mortar_and_pestle():
+    if not AUTO_CRAFT_MORTAR_AND_PESTLE:
+        say('Mortar and pestle non trovato nello zaino.', 33)
+        return False
+
+    if backpack_count(INGOT_ID) < MORTAR_REQUIRED_INGOTS:
+        say('Mortaio mancante e lingotti insufficienti per craftarlo.', 33)
+        return False
+
+    tinker_tools = find_tinker_tools()
+    if tinker_tools is None:
+        say('Mortaio mancante e tinker tools non trovati nello zaino.', 33)
+        return False
+
+    if DRY_RUN:
+        say('DRY RUN: crafterei un mortar and pestle con Tinkering.', 88)
+        return True
+
+    say('Mortar and pestle mancante: provo a craftarlo con Tinkering.', 53)
+    Gumps.ResetGump()
+    Journal.Clear()
+    Items.UseItem(tinker_tools, None, False)
+    Misc.Pause(OPEN_GUMP_PAUSE_MS)
+
+    gump_id = wait_for_gump(MORTAR_CRAFT_GUMP_ID)
+    if gump_id == 0:
+        say('Gump Tinkering non trovato.', 33)
+        return False
+
+    if MORTAR_CATEGORY_BUTTON > 0 and MORTAR_ITEM_BUTTON > 0:
+        send_gump_button(gump_id, MORTAR_CATEGORY_BUTTON)
+        gump_id = wait_for_gump(MORTAR_CRAFT_GUMP_ID)
+        if gump_id == 0:
+            say('Gump Tinkering chiuso dopo la categoria.', 33)
+            return False
+        send_gump_button(gump_id, MORTAR_ITEM_BUTTON)
+    else:
+        say('Uso Make Last di Tinkering: deve essere impostato su mortar and pestle.', 53)
+        send_gump_button(gump_id, MORTAR_MAKE_LAST_BUTTON)
+
+    outcome = wait_for_result()
+    if outcome == 'stop':
+        return False
+
+    Misc.Pause(ACTION_PAUSE_MS)
+    if find_tool() is None:
+        say('Craft mortaio non verificato: controlla button id o Make Last Tinkering.', 33)
+        return False
+
+    say('Mortar and pestle craftato.', 68)
+    return True
+
+
+def ensure_mortar_and_pestle():
+    if find_tool() is not None:
+        return True
+    return craft_mortar_and_pestle()
 
 
 def open_craft_gump():
@@ -263,16 +365,7 @@ def select_recipe(recipe):
         return 'stop'
 
     send_gump_button(gump_id, item_button)
-    result = Journal.WaitJournal(SUCCESS_MESSAGES + STOP_MESSAGES, CRAFT_RESULT_TIMEOUT_MS)
-    if result:
-        result_lower = result.lower()
-        for stop_message in STOP_MESSAGES:
-            if stop_message.lower() in result_lower:
-                say('Stop dal journal: {0}'.format(result), 33)
-                return 'stop'
-        return 'success'
-
-    return 'unknown'
+    return wait_for_result()
 
 
 def craft_once():
@@ -283,18 +376,8 @@ def craft_once():
 
     send_gump_button(gump_id, MAKE_LAST_BUTTON)
 
-    result = Journal.WaitJournal(SUCCESS_MESSAGES + STOP_MESSAGES, CRAFT_RESULT_TIMEOUT_MS)
-    if result:
-        result_lower = result.lower()
-        for stop_message in STOP_MESSAGES:
-            if stop_message.lower() in result_lower:
-                say('Stop dal journal: {0}'.format(result), 33)
-                return 'stop'
-
-        return 'success'
-
     # Some shards do not emit a journal line for successful crafting.
-    return 'unknown'
+    return wait_for_result()
 
 
 def main():
@@ -308,15 +391,13 @@ def main():
         say('MAKE_LAST_BUTTON deve essere configurato.', 33)
         return
 
+    if not ensure_mortar_and_pestle():
+        return
+
     recipe = POTIONS[potion_name]
     missing = missing_resources(recipe)
     if missing:
         say('Risorse mancanti: {0}.'.format(', '.join(missing)), 33)
-        return
-
-    tool = find_tool()
-    if tool is None:
-        say('Mortar and pestle non trovato nello zaino.', 33)
         return
 
     max_by_resources = possible_crafts(recipe)
