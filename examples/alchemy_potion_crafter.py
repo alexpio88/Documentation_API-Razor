@@ -6,7 +6,9 @@ How to use:
    the resource chest selected when the script starts.
    If you want the script to craft the mortar and pestle when missing, also put
    tinker tools and ingots in your backpack or resource chest.
-2. Set POTION_TO_CRAFT and AMOUNT_TO_CRAFT below.
+2. Use the startup window to select potions/apples and quantities. If the
+   window is disabled or unavailable, POTION_TO_CRAFT and AMOUNT_TO_CRAFT are
+   used as fallback.
 3. Open the Alchemy crafting gump once and craft the potion manually, or fill
    the category/item button ids in POTIONS to let the script select the recipe.
 4. Run this script from Razor Enhanced.
@@ -21,6 +23,7 @@ import re
 
 # ----------------------------- User settings ------------------------------
 
+USE_SELECTION_WINDOW = True
 POTION_TO_CRAFT = 'greater heal'
 AMOUNT_TO_CRAFT = 25
 
@@ -28,6 +31,7 @@ MORTAR_AND_PESTLE_ID = 0x0E9B
 EMPTY_BOTTLE_ID = 0x0F0E
 TINKER_TOOLS_ID = 0x1EB8
 INGOT_ID = 0x1BF2
+APPLE_ID = 0x09D0
 
 # Ask for the resource chest at script start. The script restocks reagents,
 # bottles, ingots, and tinker tools from this chest when needed.
@@ -95,6 +99,9 @@ REAGENTS = {
     'spider silk': 0x0F8D,
     'sulfurous ash': 0x0F8C,
 }
+
+MATERIALS = dict(REAGENTS)
+MATERIALS['apple'] = APPLE_ID
 
 POTIONS = {
     'refresh': {
@@ -176,6 +183,17 @@ POTIONS = {
         'reagents': {'sulfurous ash': 1},
         'category_button': 0,
         'item_button': 0,
+    },
+}
+
+APPLE_CRAFTS = {
+    'enchanted apple': {
+        'display': 'mele incantate',
+        'materials': {'apple': 1},
+        'uses_bottle': False,
+        'category_button': 0,
+        'item_button': 0,
+        'make_last_button': MAKE_LAST_BUTTON,
     },
 }
 
@@ -348,14 +366,27 @@ def ensure_item_in_backpack(item_id, label):
     return restock_item(item_id, 1, label)
 
 
-def restock_potion_resources(recipe, target_amount):
-    if not restock_stack_to_backpack(EMPTY_BOTTLE_ID, target_amount, 'empty bottles'):
-        return False
+def recipe_materials(recipe):
+    if 'materials' in recipe:
+        return recipe['materials']
+    return recipe['reagents']
 
-    for reagent_name in recipe['reagents']:
-        item_id = REAGENTS[reagent_name]
-        needed = recipe['reagents'][reagent_name] * target_amount
-        if not restock_stack_to_backpack(item_id, needed, reagent_name):
+
+def recipe_uses_bottle(recipe):
+    if 'uses_bottle' in recipe:
+        return recipe['uses_bottle']
+    return True
+
+
+def restock_recipe_resources(recipe, target_amount):
+    if recipe_uses_bottle(recipe):
+        if not restock_stack_to_backpack(EMPTY_BOTTLE_ID, target_amount, 'empty bottles'):
+            return False
+
+    for material_name in recipe_materials(recipe):
+        item_id = MATERIALS[material_name]
+        needed = recipe_materials(recipe)[material_name] * target_amount
+        if not restock_stack_to_backpack(item_id, needed, material_name):
             return False
 
     return True
@@ -367,31 +398,36 @@ def has_weight_room():
     return Player.Weight < (Player.MaxWeight - MAX_WEIGHT_BUFFER)
 
 
-def missing_resources(recipe):
+def missing_recipe_resources(recipe):
     missing = []
 
-    bottles = backpack_count(EMPTY_BOTTLE_ID)
-    if bottles < 1:
+    if recipe_uses_bottle(recipe) and backpack_count(EMPTY_BOTTLE_ID) < 1:
         missing.append('empty bottles')
 
-    for reagent_name in recipe['reagents']:
-        item_id = REAGENTS[reagent_name]
-        needed = recipe['reagents'][reagent_name]
+    for material_name in recipe_materials(recipe):
+        item_id = MATERIALS[material_name]
+        needed = recipe_materials(recipe)[material_name]
         if backpack_count(item_id) < needed:
-            missing.append(reagent_name)
+            missing.append(material_name)
 
     return missing
 
 
-def possible_crafts(recipe, include_chest=False):
-    possible = available_count(EMPTY_BOTTLE_ID, include_chest)
+def possible_recipe_crafts(recipe, include_chest=False):
+    possible = 999999
 
-    for reagent_name in recipe['reagents']:
-        item_id = REAGENTS[reagent_name]
-        needed = recipe['reagents'][reagent_name]
+    if recipe_uses_bottle(recipe):
+        possible = available_count(EMPTY_BOTTLE_ID, include_chest)
+
+    for material_name in recipe_materials(recipe):
+        item_id = MATERIALS[material_name]
+        needed = recipe_materials(recipe)[material_name]
         amount = available_count(item_id, include_chest) / needed
         if amount < possible:
             possible = amount
+
+    if possible == 999999:
+        return 0
 
     return int(possible)
 
@@ -584,7 +620,7 @@ def send_gump_button(gump_id, button_id):
     return True
 
 
-def select_recipe(recipe):
+def select_recipe_for_job(recipe):
     category_button = recipe['category_button']
     item_button = recipe['item_button']
 
@@ -597,7 +633,7 @@ def select_recipe(recipe):
         say('Crafting gump non aperto.', 33)
         return 'stop'
 
-    say('Seleziono categoria e ricetta dal gump.')
+    say('Seleziono ricetta dal gump.')
     send_gump_button(gump_id, category_button)
     gump_id = wait_for_craft_gump()
     if gump_id == 0:
@@ -608,16 +644,205 @@ def select_recipe(recipe):
     return wait_for_result()
 
 
-def craft_once():
+def craft_once(make_last_button):
     gump_id = open_craft_gump()
     if gump_id == 0:
         say('Crafting gump non trovato.', 33)
         return 'stop'
 
-    send_gump_button(gump_id, MAKE_LAST_BUTTON)
+    send_gump_button(gump_id, make_last_button)
 
     # Some shards do not emit a journal line for successful crafting.
     return wait_for_result()
+
+
+def get_recipe(recipe_type, recipe_name):
+    if recipe_type == 'potion':
+        return POTIONS[recipe_name]
+    return APPLE_CRAFTS[recipe_name]
+
+
+def get_recipe_display(recipe_type, recipe_name):
+    recipe = get_recipe(recipe_type, recipe_name)
+    if 'display' in recipe:
+        return recipe['display']
+    return recipe_name
+
+
+def craft_job(recipe_type, recipe_name, target_amount):
+    if not ensure_mortar_and_pestle():
+        return False
+
+    recipe = get_recipe(recipe_type, recipe_name)
+    display = get_recipe_display(recipe_type, recipe_name)
+
+    if target_amount <= 0:
+        target_amount = possible_recipe_crafts(recipe, True)
+
+    if target_amount > 0 and not restock_recipe_resources(recipe, target_amount):
+        return False
+
+    missing = missing_recipe_resources(recipe)
+    if missing:
+        say('Risorse mancanti per {0}: {1}.'.format(display, ', '.join(missing)), 33)
+        return False
+
+    max_by_resources = possible_recipe_crafts(recipe)
+    if target_amount <= 0 or target_amount > max_by_resources:
+        target_amount = max_by_resources
+
+    if target_amount <= 0:
+        say('Nessun craft possibile per {0}.'.format(display), 33)
+        return False
+
+    say('Avvio craft: {0} x {1}.'.format(target_amount, display))
+
+    crafted = 0
+    attempts = 0
+    max_attempts = target_amount + 10
+
+    first_outcome = select_recipe_for_job(recipe)
+    if first_outcome == 'stop':
+        return False
+    if first_outcome != 'skip':
+        crafted += 1
+        say('Craft {0}/{1} ({2}).'.format(crafted, target_amount, first_outcome), 68)
+
+    make_last_button = recipe.get('make_last_button', MAKE_LAST_BUTTON)
+    while crafted < target_amount and attempts < max_attempts:
+        attempts += 1
+
+        if not has_weight_room():
+            say('Peso quasi al massimo: {0}/{1}.'.format(Player.Weight, Player.MaxWeight), 33)
+            return False
+
+        missing = missing_recipe_resources(recipe)
+        if missing:
+            say('Risorse finite per {0}: {1}.'.format(display, ', '.join(missing)), 33)
+            return False
+
+        outcome = craft_once(make_last_button)
+        if outcome == 'stop':
+            return False
+
+        crafted += 1
+        say('Craft {0}/{1} ({2}).'.format(crafted, target_amount, outcome), 68)
+        Misc.Pause(ACTION_PAUSE_MS)
+
+    say('Finito {0}. Tentativi: {1}, craft conteggiati: {2}.'.format(display, attempts, crafted), 68)
+    return True
+
+
+def fallback_jobs():
+    potion_name = normalize(POTION_TO_CRAFT)
+    if potion_name not in POTIONS:
+        say('Pozione non configurata: {0}'.format(POTION_TO_CRAFT), 33)
+        say('Disponibili: {0}'.format(', '.join(sorted(POTIONS.keys()))), 33)
+        return []
+    return [('potion', potion_name, AMOUNT_TO_CRAFT)]
+
+
+def prompt_craft_jobs():
+    if not USE_SELECTION_WINDOW:
+        return fallback_jobs()
+
+    try:
+        import clr
+        clr.AddReference('System.Windows.Forms')
+        clr.AddReference('System.Drawing')
+        from System.Drawing import Point, Size
+        from System.Windows.Forms import Button, CheckBox, DialogResult, Form, FormBorderStyle, Label, NumericUpDown
+    except Exception as error:
+        say('Finestra selezione non disponibile: uso fallback. {0}'.format(error), 53)
+        return fallback_jobs()
+
+    form = Form()
+    form.Text = 'Alchemy craft'
+    form.Size = Size(430, 620)
+    form.FormBorderStyle = FormBorderStyle.FixedDialog
+    form.MaximizeBox = False
+    form.MinimizeBox = False
+    form.AutoScroll = True
+    form.AutoScrollMinSize = Size(400, 520)
+
+    title = Label()
+    title.Text = 'Seleziona cosa craftare e la quantita:'
+    title.Location = Point(12, 12)
+    title.Size = Size(360, 22)
+    form.Controls.Add(title)
+
+    controls = []
+    y_pos = [42]
+
+    def add_recipe_row(recipe_type, recipe_name):
+        checkbox = CheckBox()
+        checkbox.Text = get_recipe_display(recipe_type, recipe_name)
+        checkbox.Location = Point(18, y_pos[0])
+        checkbox.Size = Size(250, 24)
+        form.Controls.Add(checkbox)
+
+        amount = NumericUpDown()
+        amount.Location = Point(285, y_pos[0])
+        amount.Size = Size(80, 24)
+        amount.Minimum = 0
+        amount.Maximum = 999
+        amount.Value = 0
+        form.Controls.Add(amount)
+
+        controls.append((recipe_type, recipe_name, checkbox, amount))
+        y_pos[0] += 30
+
+    section = Label()
+    section.Text = 'Pozioni'
+    section.Location = Point(12, y_pos[0])
+    section.Size = Size(360, 22)
+    form.Controls.Add(section)
+    y_pos[0] += 24
+
+    for potion_name in sorted(POTIONS.keys()):
+        add_recipe_row('potion', potion_name)
+
+    y_pos[0] += 8
+    section = Label()
+    section.Text = 'Mele'
+    section.Location = Point(12, y_pos[0])
+    section.Size = Size(360, 22)
+    form.Controls.Add(section)
+    y_pos[0] += 24
+
+    for apple_name in sorted(APPLE_CRAFTS.keys()):
+        add_recipe_row('apple', apple_name)
+
+    ok_button = Button()
+    ok_button.Text = 'Avvia'
+    ok_button.Location = Point(210, y_pos[0] + 14)
+    ok_button.DialogResult = DialogResult.OK
+    form.Controls.Add(ok_button)
+
+    cancel_button = Button()
+    cancel_button.Text = 'Annulla'
+    cancel_button.Location = Point(300, y_pos[0] + 14)
+    cancel_button.DialogResult = DialogResult.Cancel
+    form.Controls.Add(cancel_button)
+
+    form.AcceptButton = ok_button
+    form.CancelButton = cancel_button
+
+    result = form.ShowDialog()
+    if result != DialogResult.OK:
+        say('Craft annullato dalla finestra.', 33)
+        return []
+
+    jobs = []
+    for recipe_type, recipe_name, checkbox, amount in controls:
+        quantity = int(amount.Value)
+        if checkbox.Checked and quantity > 0:
+            jobs.append((recipe_type, recipe_name, quantity))
+
+    if not jobs:
+        say('Nessun craft selezionato.', 33)
+
+    return jobs
 
 
 def main():
@@ -627,76 +852,19 @@ def main():
     if not ensure_tinker_tools_reserve(False):
         return
 
-    potion_name = normalize(POTION_TO_CRAFT)
-    if potion_name not in POTIONS:
-        say('Pozione non configurata: {0}'.format(POTION_TO_CRAFT), 33)
-        say('Disponibili: {0}'.format(', '.join(sorted(POTIONS.keys()))), 33)
-        return
-
     if MAKE_LAST_BUTTON <= 0:
         say('MAKE_LAST_BUTTON deve essere configurato.', 33)
         return
 
-    if not ensure_mortar_and_pestle():
+    jobs = prompt_craft_jobs()
+    if not jobs:
         return
 
-    recipe = POTIONS[potion_name]
-
-    target_amount = AMOUNT_TO_CRAFT
-    if target_amount <= 0:
-        target_amount = possible_crafts(recipe, True)
-
-    if target_amount > 0 and not restock_potion_resources(recipe, target_amount):
-        return
-
-    missing = missing_resources(recipe)
-    if missing:
-        say('Risorse mancanti: {0}.'.format(', '.join(missing)), 33)
-        return
-
-    max_by_resources = possible_crafts(recipe)
-    if target_amount <= 0 or target_amount > max_by_resources:
-        target_amount = max_by_resources
-
-    if target_amount <= 0:
-        say('Nessun craft possibile con le risorse attuali.', 33)
-        return
-
-    say('Avvio craft: {0} x {1}.'.format(target_amount, potion_name))
-
-    crafted = 0
-    attempts = 0
-    max_attempts = target_amount + 10
-
-    if SELECT_RECIPE_FIRST:
-        first_outcome = select_recipe(recipe)
-        if first_outcome == 'stop':
-            return
-        if first_outcome != 'skip':
-            crafted += 1
-            say('Craft {0}/{1} ({2}).'.format(crafted, target_amount, first_outcome), 68)
-
-    while crafted < target_amount and attempts < max_attempts:
-        attempts += 1
-
-        if not has_weight_room():
-            say('Peso quasi al massimo: {0}/{1}.'.format(Player.Weight, Player.MaxWeight), 33)
+    for recipe_type, recipe_name, amount in jobs:
+        if not craft_job(recipe_type, recipe_name, amount):
             break
 
-        missing = missing_resources(recipe)
-        if missing:
-            say('Risorse finite: {0}.'.format(', '.join(missing)), 33)
-            break
-
-        outcome = craft_once()
-        if outcome == 'stop':
-            break
-
-        crafted += 1
-        say('Craft {0}/{1} ({2}).'.format(crafted, target_amount, outcome), 68)
-        Misc.Pause(ACTION_PAUSE_MS)
-
-    say('Finito. Tentativi: {0}, craft conteggiati: {1}.'.format(attempts, crafted), 68)
+    say('Coda craft terminata.', 68)
 
 
 main()

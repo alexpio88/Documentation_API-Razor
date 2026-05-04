@@ -9,10 +9,11 @@ Examples
 Alchemy potion crafter
 ----------------------
 
-Configurable Razor Enhanced Python macro that prompts for a resource chest,
-restocks bottles/reagents/tools from it, and crafts Alchemy potions. If the
-mortar and pestle is missing, the script can craft one first with tinker tools
-and ingots, and it can craft spare tinker tools before the current one runs out.
+Configurable Razor Enhanced Python macro with a startup selection window for
+potions/apples and quantities. It prompts for a resource chest, restocks
+bottles/reagents/tools from it, and crafts the selected queue. If the mortar and
+pestle is missing, the script can craft one first with tinker tools and ingots,
+and it can craft spare tinker tools before the current one runs out.
 
 .. literalinclude:: alchemy_potion_crafter.py
    :language: python
