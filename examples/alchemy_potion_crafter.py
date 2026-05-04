@@ -17,6 +17,8 @@ If MAKE_LAST_BUTTON is wrong for your shard, use Razor Enhanced's Inspect Gumps
 or Record tool to capture the correct button id and update the value below.
 """
 
+import re
+
 # ----------------------------- User settings ------------------------------
 
 POTION_TO_CRAFT = 'greater heal'
@@ -46,6 +48,10 @@ SELECT_RECIPE_FIRST = False
 # If no mortar and pestle is found, try to craft one with Tinkering.
 AUTO_CRAFT_MORTAR_AND_PESTLE = True
 
+# Keep a spare tinker tool ready before the current one gets too low.
+TINKER_TOOLS_MIN_USES = 20
+TINKER_TOOLS_REQUIRED_INGOTS = 2
+
 # 0 means "wait for any gump". Set a fixed Tinkering gump id if needed.
 MORTAR_CRAFT_GUMP_ID = 0
 
@@ -58,6 +64,12 @@ MORTAR_MAKE_LAST_BUTTON = 21
 MORTAR_CATEGORY_BUTTON = 0
 MORTAR_ITEM_BUTTON = 0
 MORTAR_REQUIRED_INGOTS = 3
+
+# Optional Tinkering button ids for the tinker tools recipe. If left as 0, the
+# script uses MORTAR_MAKE_LAST_BUTTON, so your last Tinkering recipe must be
+# tinker tools when this reserve craft is needed.
+TINKER_TOOLS_CATEGORY_BUTTON = 0
+TINKER_TOOLS_ITEM_BUTTON = 0
 
 GUMP_TIMEOUT_MS = 5000
 CRAFT_RESULT_TIMEOUT_MS = 9000
@@ -245,6 +257,22 @@ def find_tinker_tools():
     return Items.FindByID(TINKER_TOOLS_ID, -1, backpack_serial(), True, False)
 
 
+def extract_first_number(text):
+    match = re.search(r'\d+', text)
+    if match:
+        return int(match.group(0))
+    return None
+
+
+def tinker_tool_uses_remaining(tool):
+    props = Items.GetPropStringList(tool)
+    for prop in props:
+        prop_lower = prop.lower()
+        if 'uses remaining' in prop_lower or 'usi rimasti' in prop_lower:
+            return extract_first_number(prop)
+    return None
+
+
 def chest_count(item_id):
     if RESOURCE_CHEST_SERIAL <= 0:
         return 0
@@ -394,28 +422,7 @@ def wait_for_result():
     return 'success'
 
 
-def craft_mortar_and_pestle():
-    if not AUTO_CRAFT_MORTAR_AND_PESTLE:
-        say('Mortar and pestle non trovato nello zaino.', 33)
-        return False
-
-    ensure_item_in_backpack(TINKER_TOOLS_ID, 'tinker tools')
-    restock_stack_to_backpack(INGOT_ID, MORTAR_REQUIRED_INGOTS, 'ingots')
-
-    if backpack_count(INGOT_ID) < MORTAR_REQUIRED_INGOTS:
-        say('Mortaio mancante e lingotti insufficienti per craftarlo.', 33)
-        return False
-
-    tinker_tools = find_tinker_tools()
-    if tinker_tools is None:
-        say('Mortaio mancante e tinker tools non trovati nello zaino.', 33)
-        return False
-
-    if DRY_RUN:
-        say('DRY RUN: crafterei un mortar and pestle con Tinkering.', 88)
-        return True
-
-    say('Mortar and pestle mancante: provo a craftarlo con Tinkering.', 53)
+def open_tinkering_gump(tinker_tools):
     Gumps.ResetGump()
     Journal.Clear()
     Items.UseItem(tinker_tools, None, False)
@@ -424,21 +431,117 @@ def craft_mortar_and_pestle():
     gump_id = wait_for_gump(MORTAR_CRAFT_GUMP_ID)
     if gump_id == 0:
         say('Gump Tinkering non trovato.', 33)
+    return gump_id
+
+
+def send_tinkering_recipe(category_button, item_button, make_last_button, make_last_label):
+    tinker_tools = find_tinker_tools()
+    if tinker_tools is None:
+        say('Tinker tools non trovati nello zaino.', 33)
         return False
 
-    if MORTAR_CATEGORY_BUTTON > 0 and MORTAR_ITEM_BUTTON > 0:
-        send_gump_button(gump_id, MORTAR_CATEGORY_BUTTON)
+    if DRY_RUN:
+        say('DRY RUN: aprirei il gump Tinkering.', 88)
+        return True
+
+    gump_id = open_tinkering_gump(tinker_tools)
+    if gump_id == 0:
+        return False
+
+    if category_button > 0 and item_button > 0:
+        send_gump_button(gump_id, category_button)
         gump_id = wait_for_gump(MORTAR_CRAFT_GUMP_ID)
         if gump_id == 0:
             say('Gump Tinkering chiuso dopo la categoria.', 33)
             return False
-        send_gump_button(gump_id, MORTAR_ITEM_BUTTON)
+        send_gump_button(gump_id, item_button)
     else:
-        say('Uso Make Last di Tinkering: deve essere impostato su mortar and pestle.', 53)
-        send_gump_button(gump_id, MORTAR_MAKE_LAST_BUTTON)
+        say('Uso Make Last di Tinkering: deve essere impostato su {0}.'.format(make_last_label), 53)
+        send_gump_button(gump_id, make_last_button)
 
-    outcome = wait_for_result()
-    if outcome == 'stop':
+    return wait_for_result() != 'stop'
+
+
+def craft_tinker_tools():
+    ensure_item_in_backpack(TINKER_TOOLS_ID, 'tinker tools')
+    restock_stack_to_backpack(INGOT_ID, TINKER_TOOLS_REQUIRED_INGOTS, 'ingots')
+
+    if backpack_count(INGOT_ID) < TINKER_TOOLS_REQUIRED_INGOTS:
+        say('Lingotti insufficienti per craftare tinker tools di riserva.', 33)
+        return False
+
+    if find_tinker_tools() is None:
+        say('Tinker tools non trovati per craftarne uno nuovo.', 33)
+        return False
+
+    if DRY_RUN:
+        say('DRY RUN: crafterei tinker tools di riserva.', 88)
+        return True
+
+    before_count = backpack_count(TINKER_TOOLS_ID)
+    say('Tinker tools sotto soglia: provo a craftarne uno di riserva.', 53)
+    if not send_tinkering_recipe(
+        TINKER_TOOLS_CATEGORY_BUTTON,
+        TINKER_TOOLS_ITEM_BUTTON,
+        MORTAR_MAKE_LAST_BUTTON,
+        'tinker tools',
+    ):
+        return False
+
+    Misc.Pause(ACTION_PAUSE_MS)
+    if backpack_count(TINKER_TOOLS_ID) <= before_count:
+        say('Craft tinker tools non verificato: controlla button id o Make Last Tinkering.', 33)
+        return False
+
+    say('Tinker tools di riserva craftati.', 68)
+    return True
+
+
+def ensure_tinker_tools_reserve(required):
+    if not ensure_item_in_backpack(TINKER_TOOLS_ID, 'tinker tools'):
+        if required:
+            say('Tinker tools non trovati nello zaino o nella cassa.', 33)
+            return False
+        return True
+
+    tinker_tools = find_tinker_tools()
+    uses = tinker_tool_uses_remaining(tinker_tools)
+    if uses is None:
+        say('Usi rimasti dei tinker tools non leggibili: continuo.', 53)
+        return True
+
+    if uses >= TINKER_TOOLS_MIN_USES:
+        return True
+
+    say('Tinker tools a {0} usi: soglia {1}.'.format(uses, TINKER_TOOLS_MIN_USES), 53)
+    return craft_tinker_tools()
+
+
+def craft_mortar_and_pestle():
+    if not AUTO_CRAFT_MORTAR_AND_PESTLE:
+        say('Mortar and pestle non trovato nello zaino.', 33)
+        return False
+
+    if not ensure_tinker_tools_reserve(True):
+        return False
+
+    restock_stack_to_backpack(INGOT_ID, MORTAR_REQUIRED_INGOTS, 'ingots')
+
+    if backpack_count(INGOT_ID) < MORTAR_REQUIRED_INGOTS:
+        say('Mortaio mancante e lingotti insufficienti per craftarlo.', 33)
+        return False
+
+    if DRY_RUN:
+        say('DRY RUN: crafterei un mortar and pestle con Tinkering.', 88)
+        return True
+
+    say('Mortar and pestle mancante: provo a craftarlo con Tinkering.', 53)
+    if not send_tinkering_recipe(
+        MORTAR_CATEGORY_BUTTON,
+        MORTAR_ITEM_BUTTON,
+        MORTAR_MAKE_LAST_BUTTON,
+        'mortar and pestle',
+    ):
         return False
 
     Misc.Pause(ACTION_PAUSE_MS)
@@ -519,6 +622,9 @@ def craft_once():
 
 def main():
     if not select_resource_chest():
+        return
+
+    if not ensure_tinker_tools_reserve(False):
         return
 
     potion_name = normalize(POTION_TO_CRAFT)
