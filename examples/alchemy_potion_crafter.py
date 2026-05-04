@@ -2,9 +2,10 @@
 Razor Enhanced - Alchemy potion crafter
 
 How to use:
-1. Put a mortar and pestle, empty bottles, and reagents in your backpack.
+1. Put a mortar and pestle, empty bottles, and reagents in your backpack or in
+   the resource chest selected when the script starts.
    If you want the script to craft the mortar and pestle when missing, also put
-   tinker tools and ingots in your backpack.
+   tinker tools and ingots in your backpack or resource chest.
 2. Set POTION_TO_CRAFT and AMOUNT_TO_CRAFT below.
 3. Open the Alchemy crafting gump once and craft the potion manually, or fill
    the category/item button ids in POTIONS to let the script select the recipe.
@@ -25,6 +26,12 @@ MORTAR_AND_PESTLE_ID = 0x0E9B
 EMPTY_BOTTLE_ID = 0x0F0E
 TINKER_TOOLS_ID = 0x1EB8
 INGOT_ID = 0x1BF2
+
+# Ask for the resource chest at script start. The script restocks reagents,
+# bottles, ingots, and tinker tools from this chest when needed.
+PROMPT_RESOURCE_CHEST = True
+RESOURCE_CHEST_SERIAL = 0
+RESTOCK_FROM_RESOURCE_CHEST = True
 
 # 0 means "wait for any gump". Set a fixed gump id if your shard needs it.
 CRAFT_GUMP_ID = 0
@@ -56,6 +63,7 @@ GUMP_TIMEOUT_MS = 5000
 CRAFT_RESULT_TIMEOUT_MS = 9000
 ACTION_PAUSE_MS = 700
 OPEN_GUMP_PAUSE_MS = 400
+MOVE_PAUSE_MS = 650
 
 # Stop before becoming overloaded.
 MAX_WEIGHT_BUFFER = 10
@@ -193,12 +201,136 @@ def backpack_serial():
     return Player.Backpack.Serial
 
 
+def resource_chest():
+    if RESOURCE_CHEST_SERIAL <= 0:
+        return None
+    return Items.FindBySerial(RESOURCE_CHEST_SERIAL)
+
+
+def select_resource_chest():
+    global RESOURCE_CHEST_SERIAL
+
+    if not PROMPT_RESOURCE_CHEST and RESOURCE_CHEST_SERIAL > 0:
+        return open_resource_chest()
+
+    if not PROMPT_RESOURCE_CHEST:
+        return True
+
+    serial = Target.PromptTarget('Seleziona la cassa risorse per alchemy.', 68)
+    if serial <= 0:
+        say('Nessuna cassa risorse selezionata.', 33)
+        return False
+
+    RESOURCE_CHEST_SERIAL = serial
+    return open_resource_chest()
+
+
+def open_resource_chest():
+    chest = resource_chest()
+    if chest is None:
+        say('Cassa risorse non trovata.', 33)
+        return False
+
+    Items.UseItem(chest, None, False)
+    Items.WaitForContents(chest, GUMP_TIMEOUT_MS)
+    Misc.Pause(OPEN_GUMP_PAUSE_MS)
+    return True
+
+
 def find_tool():
     return Items.FindByID(MORTAR_AND_PESTLE_ID, -1, backpack_serial(), True, False)
 
 
 def find_tinker_tools():
     return Items.FindByID(TINKER_TOOLS_ID, -1, backpack_serial(), True, False)
+
+
+def chest_count(item_id):
+    if RESOURCE_CHEST_SERIAL <= 0:
+        return 0
+    return Items.ContainerCount(RESOURCE_CHEST_SERIAL, item_id, -1, True)
+
+
+def available_count(item_id, include_chest):
+    total = backpack_count(item_id)
+    if include_chest and RESTOCK_FROM_RESOURCE_CHEST:
+        total += chest_count(item_id)
+    return total
+
+
+def restock_item(item_id, amount, label):
+    if amount <= 0:
+        return True
+
+    if not RESTOCK_FROM_RESOURCE_CHEST or RESOURCE_CHEST_SERIAL <= 0:
+        return False
+
+    if not open_resource_chest():
+        return False
+
+    available = chest_count(item_id)
+    if available < amount:
+        say('Cassa risorse: mancano {0} x {1}.'.format(amount - available, label), 33)
+        return False
+
+    item = Items.FindByID(item_id, -1, RESOURCE_CHEST_SERIAL, True, False)
+    if item is None:
+        say('Cassa risorse: {0} non trovato.'.format(label), 33)
+        return False
+
+    if DRY_RUN:
+        say('DRY RUN: prenderei {0} x {1} dalla cassa.'.format(amount, label), 88)
+        return True
+
+    remaining = amount
+    while remaining > 0:
+        item = Items.FindByID(item_id, -1, RESOURCE_CHEST_SERIAL, True, False)
+        if item is None:
+            break
+
+        stack_amount = item.Amount
+        if stack_amount <= 0:
+            stack_amount = 1
+
+        move_amount = remaining
+        if stack_amount < move_amount:
+            move_amount = stack_amount
+
+        Items.Move(item, Player.Backpack, move_amount)
+        Misc.Pause(MOVE_PAUSE_MS)
+        remaining -= move_amount
+
+    if remaining > 0:
+        say('Non sono riuscito a prendere tutti: {0} x {1} mancanti.'.format(remaining, label), 33)
+        return False
+
+    return True
+
+
+def restock_stack_to_backpack(item_id, desired_amount, label):
+    current = backpack_count(item_id)
+    if current >= desired_amount:
+        return True
+    return restock_item(item_id, desired_amount - current, label)
+
+
+def ensure_item_in_backpack(item_id, label):
+    if Items.FindByID(item_id, -1, backpack_serial(), True, False) is not None:
+        return True
+    return restock_item(item_id, 1, label)
+
+
+def restock_potion_resources(recipe, target_amount):
+    if not restock_stack_to_backpack(EMPTY_BOTTLE_ID, target_amount, 'empty bottles'):
+        return False
+
+    for reagent_name in recipe['reagents']:
+        item_id = REAGENTS[reagent_name]
+        needed = recipe['reagents'][reagent_name] * target_amount
+        if not restock_stack_to_backpack(item_id, needed, reagent_name):
+            return False
+
+    return True
 
 
 def has_weight_room():
@@ -223,13 +355,13 @@ def missing_resources(recipe):
     return missing
 
 
-def possible_crafts(recipe):
-    possible = backpack_count(EMPTY_BOTTLE_ID)
+def possible_crafts(recipe, include_chest=False):
+    possible = available_count(EMPTY_BOTTLE_ID, include_chest)
 
     for reagent_name in recipe['reagents']:
         item_id = REAGENTS[reagent_name]
         needed = recipe['reagents'][reagent_name]
-        amount = backpack_count(item_id) / needed
+        amount = available_count(item_id, include_chest) / needed
         if amount < possible:
             possible = amount
 
@@ -266,6 +398,9 @@ def craft_mortar_and_pestle():
     if not AUTO_CRAFT_MORTAR_AND_PESTLE:
         say('Mortar and pestle non trovato nello zaino.', 33)
         return False
+
+    ensure_item_in_backpack(TINKER_TOOLS_ID, 'tinker tools')
+    restock_stack_to_backpack(INGOT_ID, MORTAR_REQUIRED_INGOTS, 'ingots')
 
     if backpack_count(INGOT_ID) < MORTAR_REQUIRED_INGOTS:
         say('Mortaio mancante e lingotti insufficienti per craftarlo.', 33)
@@ -317,6 +452,8 @@ def craft_mortar_and_pestle():
 
 def ensure_mortar_and_pestle():
     if find_tool() is not None:
+        return True
+    if ensure_item_in_backpack(MORTAR_AND_PESTLE_ID, 'mortar and pestle'):
         return True
     return craft_mortar_and_pestle()
 
@@ -381,6 +518,9 @@ def craft_once():
 
 
 def main():
+    if not select_resource_chest():
+        return
+
     potion_name = normalize(POTION_TO_CRAFT)
     if potion_name not in POTIONS:
         say('Pozione non configurata: {0}'.format(POTION_TO_CRAFT), 33)
@@ -395,13 +535,20 @@ def main():
         return
 
     recipe = POTIONS[potion_name]
+
+    target_amount = AMOUNT_TO_CRAFT
+    if target_amount <= 0:
+        target_amount = possible_crafts(recipe, True)
+
+    if target_amount > 0 and not restock_potion_resources(recipe, target_amount):
+        return
+
     missing = missing_resources(recipe)
     if missing:
         say('Risorse mancanti: {0}.'.format(', '.join(missing)), 33)
         return
 
     max_by_resources = possible_crafts(recipe)
-    target_amount = AMOUNT_TO_CRAFT
     if target_amount <= 0 or target_amount > max_by_resources:
         target_amount = max_by_resources
 
