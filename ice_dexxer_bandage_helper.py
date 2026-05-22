@@ -15,6 +15,16 @@ DEX_BUFFED_VALUE       = 134
 STAM_REFRESH_THRESHOLD = 120
 HEAL_TRIGGER_HP_PCT    = 98
 
+# Bushido: Confidence ha priorità quando serve recupero, Counter Attack quando
+# si sta reggendo bene il fight e non ci sono urgenze difensive.
+BUSHIDO_ENABLED              = True
+BUSHIDO_MIN_MANA             = 10
+CONFIDENCE_HP_PCT            = 90
+CONFIDENCE_STAM_THRESHOLD    = 80
+CONFIDENCE_COOLDOWN_SEC      = 8
+COUNTER_ATTACK_MIN_HP_PCT    = 95
+COUNTER_ATTACK_COOLDOWN_SEC  = 6
+
 # ID Oggetti
 BANDAGE_ID             = 0x0E21
 FIRST_AID_BELT_ID      = 0xA1F6
@@ -48,6 +58,8 @@ _estimated_ping = 100
 _explo_armed = False
 _explo_armed_time = 0
 _explo_target_serial = None
+_last_confidence_time = 0.0
+_last_counter_attack_time = 0.0
 
 # ═══════════════════════════════════════════════════════════════════════════
 # UTILITY & GESTIONE INVENTARIO
@@ -61,6 +73,10 @@ def bandage_seconds():
     dex = Player.Dex
     secs = 11.0 - (float(dex) / 20.0)
     return max(2.0, secs)
+
+def current_hp_percent():
+    """Restituisce la percentuale vita corrente evitando divisioni per zero."""
+    return int(float(Player.Hits) / Player.HitsMax * 100) if Player.HitsMax > 0 else 100
 
 def restock_bandages_from_belt():
     """Se non ci sono bende nel backpack, ne sposta 20 dalla First Aid Belt."""
@@ -148,6 +164,52 @@ def get_best_target():
     if last and last != Player.Serial: return last
     return None
 
+def is_attacking_valid_target():
+    """Verifica che il player sia in combat e abbia un target mobile valido."""
+    if not Player.WarMode:
+        return False
+
+    target_serial = get_best_target()
+    if not target_serial:
+        return False
+
+    return Mobiles.FindBySerial(target_serial) is not None
+
+def check_bushido_combat():
+    """Gestisce Confidence e Counter Attack in base allo stato del combattimento."""
+    global _last_confidence_time, _last_counter_attack_time
+
+    if not BUSHIDO_ENABLED or _explo_armed:
+        return
+    if not is_attacking_valid_target():
+        return
+    if Player.Mana < BUSHIDO_MIN_MANA:
+        return
+
+    now = time.time()
+    hp_pct = current_hp_percent()
+    needs_confidence = hp_pct <= CONFIDENCE_HP_PCT or Player.Stam <= CONFIDENCE_STAM_THRESHOLD
+
+    # Se serve recupero, Confidence ha precedenza e blocca Counter Attack.
+    if needs_confidence:
+        if (not Player.BuffsExist("Confidence") and
+            (now - _last_confidence_time) >= CONFIDENCE_COOLDOWN_SEC):
+            Spells.CastBushido("Confidence", False)
+            _last_confidence_time = now
+            msg("Bushido: Confidence per recupero HP/Stam.", 68)
+        return
+
+    if hp_pct < COUNTER_ATTACK_MIN_HP_PCT:
+        return
+    if Player.BuffsExist("Counter Attack") or Player.BuffsExist("Confidence"):
+        return
+    if (now - _last_counter_attack_time) < COUNTER_ATTACK_COOLDOWN_SEC:
+        return
+
+    Spells.CastBushido("Counter Attack", False)
+    _last_counter_attack_time = now
+    msg("Bushido: Counter Attack pronto.", 68)
+
 def get_safety_drop_coords():
     """Calcola le coordinate a terra dietro/vicino al player in caso di emergenza."""
     px, py, pz = Player.Position.X, Player.Position.Y, Player.Position.Z
@@ -230,9 +292,10 @@ while Player.Connected:
         Misc.RemoveSharedValue('throw_explo')
         handle_explo_request()
     check_explo_throw()
+    check_bushido_combat()
 
     # 3. SISTEMA DI GUARIGIONE (BENDE AUTOMATICHE)
-    current_hp_pct = int(float(Player.Hits) / Player.HitsMax * 100) if Player.HitsMax > 0 else 100
+    current_hp_pct = current_hp_percent()
 
     if current_hp_pct < HEAL_TRIGGER_HP_PCT:
         restock_bandages_from_belt()  # Verifica ed eventuale rifornimento bende
@@ -265,6 +328,7 @@ while Player.Connected:
                     Misc.RemoveSharedValue('throw_explo')
                     handle_explo_request()
                 check_explo_throw()
+                check_bushido_combat()
 
                 Misc.Pause(COUNTER_TICK_MS)
             Misc.Pause(200)
